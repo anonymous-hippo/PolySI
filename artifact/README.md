@@ -1,6 +1,6 @@
-# PolySI Artifact
+# PolySI
 
-This directory contains the software artifact of PolySI. It includes:
+This repo contains the software artifact of PolySI, including:
 
 1. The source code of PolySI, which is our implementation of the algorithms
    described in the paper.
