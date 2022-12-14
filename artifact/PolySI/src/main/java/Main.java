@@ -1,11 +1,8 @@
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.concurrent.Callable;
 import java.util.stream.Collectors;
-
-import org.apache.commons.lang3.tuple.Pair;
 
 import history.Event;
 import history.Event.EventType;
@@ -16,6 +13,7 @@ import history.HistoryTransformer;
 import history.Transaction;
 import history.loaders.CobraHistoryLoader;
 import history.loaders.DBCopHistoryLoader;
+import history.loaders.ElleHistoryLoader;
 import history.loaders.TextHistoryLoader;
 import history.transformers.Identity;
 import history.transformers.SnapshotIsolationToSerializable;
@@ -28,10 +26,9 @@ import util.Profiler;
 import util.UnimplementedError;
 import verifier.Pruning;
 import verifier.SIVerifier;
-import graph.MatrixGraph;
 
-@Command(name = "verifier", mixinStandardHelpOptions = true, version = "verifier 0.0.1", subcommands = {
-        Audit.class, Convert.class, Stat.class, Dump.class })
+@Command(name = "verifier", mixinStandardHelpOptions = true, version = "verifier 0.0.1", subcommands = { Audit.class,
+        Convert.class, Stat.class, Dump.class })
 public class Main implements Callable<Integer> {
     @SneakyThrows
     public static void main(String[] args) {
@@ -49,8 +46,7 @@ public class Main implements Callable<Integer> {
 
 @Command(name = "audit", mixinStandardHelpOptions = true, description = "Verify a history")
 class Audit implements Callable<Integer> {
-    @Option(names = { "-t",
-            "--type" }, description = "history type: ${COMPLETION-CANDIDATES}")
+    @Option(names = { "-t", "--type" }, description = "history type: ${COMPLETION-CANDIDATES}")
     private final HistoryType type = HistoryType.COBRA;
 
     @Option(names = { "--no-pruning" }, description = "disable pruning")
@@ -59,6 +55,12 @@ class Audit implements Callable<Integer> {
     @Option(names = { "--no-coalescing" }, description = "disable coalescing")
     private final Boolean noCoalescing = false;
 
+    @Option(names = { "--list-pruning" }, description = "enable list pruning")
+    private final Boolean listPruning = false;
+
+    @Option(names = { "--dot-output" }, description = "print conflicts in dot format")
+    private final Boolean dotOutput = false;
+
     @Parameters(description = "history path")
     private Path path;
 
@@ -66,10 +68,12 @@ class Audit implements Callable<Integer> {
 
     @Override
     public Integer call() {
-        var loader = Utils.getParser(type, path);
+        var loader = Utils.getLoader(type, path);
 
         Pruning.setEnablePruning(!noPruning);
+        Pruning.setEnableListPruning(listPruning);
         SIVerifier.setCoalesceConstraints(!noCoalescing);
+        SIVerifier.setDotOutput(dotOutput);
 
         profiler.startTick("ENTIRE_EXPERIMENT");
         var pass = true;
@@ -80,6 +84,7 @@ class Audit implements Callable<Integer> {
         for (var p : profiler.getDurations()) {
             System.err.printf("%s: %dms\n", p.getKey(), p.getValue());
         }
+        System.err.printf("Max memory: %s\n", Utils.formatMemory(profiler.getMaxMemory()));
 
         if (pass) {
             System.err.println("[[[[ ACCEPT ]]]]");
@@ -93,16 +98,13 @@ class Audit implements Callable<Integer> {
 
 @Command(name = "convert", mixinStandardHelpOptions = true, description = "Convert a history between different formats")
 class Convert implements Callable<Integer> {
-    @Option(names = { "-f",
-            "--from" }, description = "input history type: ${COMPLETION-CANDIDATES}")
+    @Option(names = { "-f", "--from" }, description = "input history type: ${COMPLETION-CANDIDATES}")
     private final HistoryType inType = HistoryType.COBRA;
 
-    @Option(names = { "-o",
-            "--output" }, description = "input history type: ${COMPLETION-CANDIDATES}")
+    @Option(names = { "-o", "--output" }, description = "input history type: ${COMPLETION-CANDIDATES}")
     private final HistoryType outType = HistoryType.DBCOP;
 
-    @Option(names = { "-t",
-            "--transform" }, description = "history transformation: ${COMPLETION-CANDIDATES}")
+    @Option(names = { "-t", "--transform" }, description = "history transformation: ${COMPLETION-CANDIDATES}")
     private final HistoryTransformation transformation = HistoryTransformation.IDENTITY;
 
     @Parameters(description = "input history path", index = "0")
@@ -113,27 +115,29 @@ class Convert implements Callable<Integer> {
 
     @Override
     public Integer call() {
-        var in = Utils.getParser(inType, inPath);
-        var out = Utils.getParser(outType, outPath);
+        var in = Utils.getLoader(inType, inPath);
+        var out = Utils.getLoader(outType, outPath);
         var transformer = Utils.getTransformer(transformation);
 
         var history = in.loadHistory();
         history = transformer.transformHistory(history);
-        convertAndDump(out, history);
+
+        if (!(out instanceof HistoryParser)) {
+            throw new RuntimeException(String.format("Conversion not supported for %s", out.getClass().getName()));
+        }
+        convertAndDump((HistoryParser<?, ?>) out, history);
 
         return 0;
     }
 
-    private <T, U> void convertAndDump(HistoryParser<T, U> parser,
-            History<?, ?> history) {
+    private <T, U> void convertAndDump(HistoryParser<T, U> parser, History<?, ?> history) {
         parser.dumpHistory(parser.convertFrom(history));
     }
 }
 
 @Command(name = "stat", mixinStandardHelpOptions = true, description = "Print some statistics of a history")
 class Stat implements Callable<Integer> {
-    @Option(names = { "-t",
-            "--type" }, description = "history type: ${COMPLETION-CANDIDATES}")
+    @Option(names = { "-t", "--type" }, description = "history type: ${COMPLETION-CANDIDATES}")
     private final HistoryType type = HistoryType.COBRA;
 
     @Parameters(description = "history path")
@@ -141,46 +145,33 @@ class Stat implements Callable<Integer> {
 
     @Override
     public Integer call() {
-        var loader = Utils.getParser(type, path);
+        var loader = Utils.getLoader(type, path);
         var history = loader.loadHistory();
 
         var txns = history.getTransactions();
         var events = history.getEvents();
         var writeFreq = events.stream()
-                .collect(Collectors.toMap(ev -> ev.getKey(),
-                        ev -> ev.getType().equals(EventType.WRITE) ? 1 : 0,
+                .collect(Collectors.toMap(ev -> ev.getKey(), ev -> ev.getType().equals(EventType.WRITE) ? 1 : 0,
                         Integer::sum))
-                .entrySet().stream()
-                .collect(Collectors.toMap(w -> w.getValue(), w -> 1,
-                        Integer::sum))
-                .entrySet().stream()
-                .sorted((p, q) -> Integer.compare(p.getKey(), q.getKey()))
+                .entrySet().stream().collect(Collectors.toMap(w -> w.getValue(), w -> 1, Integer::sum)).entrySet()
+                .stream().sorted((p, q) -> Integer.compare(p.getKey(), q.getKey()))
                 .collect(Collectors.toCollection(ArrayList::new));
 
-        System.out.printf("Sessions: %d\n"
-                + "Transactions: %d, read-only: %d, write-only: %d, read-modify-write: %d\n"
-                + "Events: total %d, read %d, write %d\n" + "Variables: %d\n",
+        System.out.printf(
+                "Sessions: %d\n" + "Transactions: %d, read-only: %d, write-only: %d, read-modify-write: %d\n"
+                        + "Events: total %d, read %d, write %d\n" + "Variables: %d\n",
                 history.getSessions().size(), history.getTransactions().size(),
-                txns.stream()
-                        .filter(txn -> txn.getEvents().stream()
-                                .allMatch(ev -> ev.getType() == EventType.READ))
+                txns.stream().filter(txn -> txn.getEvents().stream().allMatch(ev -> ev.getType() == EventType.READ))
                         .count(),
-                txns.stream()
-                        .filter(txn -> txn.getEvents().stream().allMatch(
-                                ev -> ev.getType() == EventType.WRITE))
+                txns.stream().filter(txn -> txn.getEvents().stream().allMatch(ev -> ev.getType() == EventType.WRITE))
                         .count(),
-                txns.stream().filter(Stat::isReadModifyWriteTxn).count(),
-                events.size(),
-                events.stream().filter(e -> e.getType() == Event.EventType.READ)
-                        .count(),
-                events.stream()
-                        .filter(e -> e.getType() == Event.EventType.WRITE)
-                        .count(),
+                txns.stream().filter(Stat::isReadModifyWriteTxn).count(), events.size(),
+                events.stream().filter(e -> e.getType() == Event.EventType.READ).count(),
+                events.stream().filter(e -> e.getType() == Event.EventType.WRITE).count(),
                 events.stream().map(e -> e.getKey()).distinct().count());
 
         System.out.println("(writes, #keys):");
-        int min = writeFreq.get(0).getKey(),
-                max = writeFreq.get(writeFreq.size() - 1).getKey();
+        int min = writeFreq.get(0).getKey(), max = writeFreq.get(writeFreq.size() - 1).getKey();
         int step = Math.max((max - min) / 8, 1), lowerBound;
 
         if (writeFreq.get(0).getKey() == 1) {
@@ -191,19 +182,16 @@ class Stat implements Callable<Integer> {
         }
         for (; lowerBound <= max; lowerBound += step) {
             int x = lowerBound;
-            int count = writeFreq.stream()
-                    .filter(w -> x <= w.getKey() && w.getKey() < x + step)
+            int count = writeFreq.stream().filter(w -> x <= w.getKey() && w.getKey() < x + step)
                     .mapToInt(w -> w.getValue()).sum();
-            System.out.printf("%d...%d: %d\n", lowerBound,
-                    lowerBound + step - 1, count);
+            System.out.printf("%d...%d: %d\n", lowerBound, lowerBound + step - 1, count);
         }
 
         return 0;
     }
 
-    private static <KeyType, ValueType> boolean isReadModifyWriteTxn(
-            Transaction<KeyType, ValueType> txn) {
-        var readKeys = new HashSet<KeyType>();
+    private static boolean isReadModifyWriteTxn(Transaction<?, ?> txn) {
+        var readKeys = new HashSet<Object>();
         for (var ev : txn.getEvents()) {
             if (ev.getType().equals(EventType.READ)) {
                 readKeys.add(ev.getKey());
@@ -218,8 +206,7 @@ class Stat implements Callable<Integer> {
 
 @Command(name = "dump", mixinStandardHelpOptions = true, description = "Print a history to stdout")
 class Dump implements Callable<Integer> {
-    @Option(names = { "-t",
-            "--type" }, description = "history type: ${COMPLETION-CANDIDATES}")
+    @Option(names = { "-t", "--type" }, description = "history type: ${COMPLETION-CANDIDATES}")
     private final HistoryType type = HistoryType.COBRA;
 
     @Parameters(description = "history path")
@@ -227,7 +214,7 @@ class Dump implements Callable<Integer> {
 
     @Override
     public Integer call() {
-        var loader = Utils.getParser(type, path);
+        var loader = Utils.getLoader(type, path);
         var history = loader.loadHistory();
 
         for (var session : history.getSessions()) {
@@ -248,7 +235,7 @@ class Dump implements Callable<Integer> {
 }
 
 class Utils {
-    static HistoryParser<?, ?> getParser(HistoryType type, Path path) {
+    static HistoryLoader<?, ?> getLoader(HistoryType type, Path path) {
         switch (type) {
         case COBRA:
             return new CobraHistoryLoader(path);
@@ -256,6 +243,8 @@ class Utils {
             return new DBCopHistoryLoader(path);
         case TEXT:
             return new TextHistoryLoader(path);
+        case ELLE:
+            return new ElleHistoryLoader(path);
         default:
             throw new UnimplementedError();
         }
@@ -272,10 +261,22 @@ class Utils {
             throw new UnimplementedError();
         }
     }
+
+    static String formatMemory(Long memoryBytes) {
+        double[] scale = { 1, 1024, 1024 * 1024, 1024 * 1024 * 1024 };
+        String[] unit = { "B", "KB", "MB", "GB" };
+
+        for (int i = scale.length - 1; i >= 0; i--) {
+            if (i == 0 || memoryBytes >= scale[i]) {
+                return String.format("%.1f%s", memoryBytes / scale[i], unit[i]);
+            }
+        }
+        throw new Error("should not be here");
+    }
 }
 
 enum HistoryType {
-    COBRA, DBCOP, TEXT
+    COBRA, DBCOP, TEXT, ELLE
 }
 
 enum HistoryTransformation {
