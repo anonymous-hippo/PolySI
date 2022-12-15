@@ -32,10 +32,6 @@ public class Pruning {
     @Setter
     private static double stopThreshold = 0.01;
 
-    @Getter
-    @Setter
-    private static boolean enableListPruning = false;
-
     @SuppressWarnings({ "unchecked", "rawtypes" })
     static <KeyType, ValueType> boolean pruneConstraints(KnownGraph<KeyType, ValueType> knownGraph,
             Collection<SIConstraint<KeyType, ValueType>> constraints, History<KeyType, ValueType> history) {
@@ -47,7 +43,7 @@ public class Pruning {
         profiler.startTick("SI_PRUNE");
 
         boolean result;
-        if (enableListPruning && history.getEvents().iterator().next().getValue() instanceof ElleValue) {
+        if (history.getEvents().iterator().next().getValue() instanceof ElleValue) {
             result = pruneListHistory((KnownGraph) knownGraph, (Collection) constraints, (History) history);
         } else {
             result = pruneKeyValueHistory(knownGraph, constraints, history);

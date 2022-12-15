@@ -55,9 +55,6 @@ class Audit implements Callable<Integer> {
     @Option(names = { "--no-coalescing" }, description = "disable coalescing")
     private final Boolean noCoalescing = false;
 
-    @Option(names = { "--list-pruning" }, description = "enable list pruning")
-    private final Boolean listPruning = false;
-
     @Option(names = { "--dot-output" }, description = "print conflicts in dot format")
     private final Boolean dotOutput = false;
 
@@ -71,7 +68,6 @@ class Audit implements Callable<Integer> {
         var loader = Utils.getLoader(type, path);
 
         Pruning.setEnablePruning(!noPruning);
-        Pruning.setEnableListPruning(listPruning);
         SIVerifier.setCoalesceConstraints(!noCoalescing);
         SIVerifier.setDotOutput(dotOutput);
 

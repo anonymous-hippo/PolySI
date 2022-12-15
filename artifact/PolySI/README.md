@@ -24,7 +24,7 @@ Usage: verifier audit [-hV] [--no-coalescing] [--no-pruning] [-t=<type>] <path>
   -h, --help            Show this help message and exit.
       --no-coalescing   disable coalescing
       --no-pruning      disable pruning
-  -t, --type=<type>     history type: COBRA, DBCOP, TEXT
+  -t, --type=<type>     history type: COBRA, DBCOP, TEXT, ELLE
   -V, --version         Print version information and exit.
 ```
 
